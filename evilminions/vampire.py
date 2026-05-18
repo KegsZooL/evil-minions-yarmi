@@ -1,5 +1,3 @@
-'''Intercepts ZeroMQ traffic'''
-
 import logging
 import inspect
 import os
@@ -20,15 +18,12 @@ _PROXY_PULL = 'ipc:///tmp/evil-minions-pull.ipc'
 
 
 class Vampire(object):
-    '''Intercepts traffic to and from the minion via monkey patching and sends it into the Proxy.'''
-
     def __init__(self):
         self.context = zmq.Context.instance()
         self._push = None
         self._push_lock = threading.Lock()
 
     def attach(self):
-        '''Monkey-patches ZeroMQ core I/O class to capture flowing messages.'''
         AsyncReqChannel.dump = self.dump
         AsyncReqChannel._original_send = AsyncReqChannel.send
         AsyncReqChannel.send = _dumping_send
@@ -61,18 +56,27 @@ class Vampire(object):
             raise
 
     def dump(self, load, socket, method, **kwargs):
-        '''Dumps a ZeroMQ message to the Proxy'''
+        if log.isEnabledFor(logging.DEBUG):
+            cmd = load.get('cmd') if isinstance(load, dict) else None
+            fun = load.get('fun') if isinstance(load, dict) else None
+            fun_args = load.get('fun_args') if isinstance(load, dict) else None
+            arg = load.get('arg') if isinstance(load, dict) else None
+            jid = load.get('jid') if isinstance(load, dict) else None
+            log.debug(
+                "Vampire.dump socket=%s cmd=%s fun=%s jid=%s fun_args=%r arg=%r pid=%s",
+                socket, cmd, fun, jid, fun_args, arg, os.getpid(),
+            )
 
         header = {
-            'socket' : socket,
-            'time' : time.time(),
-            'pid' : os.getpid(),
+            'socket': socket,
+            'time': time.time(),
+            'pid': os.getpid(),
             'method': method,
             'kwargs': kwargs,
         }
         event = {
-            'header' : header,
-            'load' : load,
+            'header': header,
+            'load': load,
         }
 
         payload = salt.payload.dumps(event)
@@ -85,22 +89,22 @@ class Vampire(object):
                 log.error("Unable to dump event: {}".format(exc))
                 self._push_close()
 
+
 @tornado.gen.coroutine
 def _dumping_send(self, load, **kwargs):
-    '''Dumps a REQ ZeroMQ and sends it'''
     self.dump(load, 'REQ', 'send', **kwargs)
     ret = yield self._original_send(load, **kwargs)
     raise tornado.gen.Return(ret)
 
+
 @tornado.gen.coroutine
 def _dumping_crypted_transfer_decode_dictentry(self, load, **kwargs):
-    '''Dumps a REQ crypted ZeroMQ message and sends it'''
     self.dump(load, 'REQ', 'crypted_transfer_decode_dictentry', **kwargs)
     ret = yield self._original_crypted_transfer_decode_dictentry(load, **kwargs)
     raise tornado.gen.Return(ret)
 
+
 def _dumping_on_recv(self, callback):
-    '''Dumps a PUB ZeroMQ message then handles it'''
     if callback is None:
         try:
             return self._original_on_recv(None)
@@ -109,9 +113,6 @@ def _dumping_on_recv(self, callback):
                 return None
             raise
 
-    # Version-agnostic callback:
-    # - If Salt calls callback() synchronously, we still run async callbacks.
-    # - If Salt awaits callback(), returning None is still valid.
     def _logging_callback(load):
         self.dump(load, 'PUB', 'on_recv')
         result = callback(load)

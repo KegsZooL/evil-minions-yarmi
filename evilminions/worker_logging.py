@@ -1,5 +1,3 @@
-'''Logging in Hydra/proxy child processes.'''
-
 import logging
 import os
 

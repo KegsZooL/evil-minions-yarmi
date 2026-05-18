@@ -14,7 +14,6 @@ import shutil
 import sys
 import time
 
-# Salt onedir packages ship their own Python; re-exec into it when needed.
 if not os.environ.get("EVIL_MINIONS_BOOTSTRAPPED"):
     try:
         import salt  # noqa: F401
@@ -57,7 +56,6 @@ def mimic_poll_interval(minion_count, seconds):
 
 
 def main():
-    # parse commandline switches
     parser = argparse.ArgumentParser(description='Starts a salt-minion and many evil minions that mimic it.')
     parser.add_argument('--count', dest='count', type=int, default=100,
                        help='number of evil minions (default: 100)')
@@ -65,6 +63,8 @@ def main():
                        help='time between evil minion starts in seconds, supports fractions (default: 0.0)')
     parser.add_argument('--processes', dest='processes', type=int, default=None,
                        help='Hydra worker process count (default: from --count)')
+    parser.add_argument('--mimic-poll', dest='mimic_poll', type=float, default=None,
+                       help='mimic poll interval in seconds while waiting for baseline (default: auto)')
     parser.add_argument('--log-level', dest='log_level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
                        help='log level (default: INFO)')
@@ -79,11 +79,9 @@ def main():
     log.debug("Starting evil-minions, setting up infrastructure...")
 
     proc_count = hydra_process_count(args.count, args.processes)
-    mimic_poll = mimic_poll_interval(args.count, None)
+    mimic_poll = mimic_poll_interval(args.count, args.mimic_poll)
     log.debug("count=%d hydra_workers=%d mimic_poll=%.3fs", args.count, proc_count, mimic_poll)
 
-    # set up Hydras, one per process. Hydras are so called because they have
-    # many HydraHeads, each HydraHead running one evil-minion
     semaphore = Semaphore(0)
     chunks = minion_chunks(args.count, proc_count)
     hydras = [Process(target=Hydra(i).start, kwargs={
@@ -103,21 +101,19 @@ def main():
     for hydra in hydras:
         semaphore.acquire()
 
-    # set up Vampire, to intercept messages from the original minion and send them to Proxy
     vampire = Vampire()
     vampire.attach()
 
-    # set up Proxy, to route messages from Vampire to Hydras
     proxy = Process(target=start_proxy, kwargs={'semaphore': semaphore})
     proxy.start()
     semaphore.acquire()
-    # Brief pause so PUB subscribers finish handshaking before real minion traffic.
     time.sleep(0.5)
 
-    # restore salt-minion's orignal command line args and launch it
     sys.argv = [sys.argv[0]] + remaining_args
     salt_minion_executable = shutil.which('salt-minion')
-    exec(compile(open(salt_minion_executable).read(), salt_minion_executable, 'exec'))
+    with open(salt_minion_executable) as f:
+        exec(compile(f.read(), salt_minion_executable, 'exec'))
+
 
 def minion_chunks(count, processes):
     '''Returns chunks of minion indexes, per process (eg. 4 minions and 3 processes: [[0, 1], [2], [3]])'''

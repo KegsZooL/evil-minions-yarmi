@@ -7,13 +7,9 @@ from evilminions.worker_logging import setup as setup_worker_logging
 
 
 def start_proxy(semaphore):
-    '''Relays traffic from Vampire to Hydras.'''
     setup_worker_logging()
-    # set up logging
     log = logging.getLogger(__name__)
 
-    # HACK: set up a PULL/PUB proxy
-    # https://stackoverflow.com/questions/43129714/zeromq-xpub-xsub-serious-flaw
     log.debug("Starting proxy...")
     context = zmq.Context()
     xsub = context.socket(zmq.PULL)

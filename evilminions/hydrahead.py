@@ -20,7 +20,6 @@ from evilminions.utils import replace_recursively, fun_call_id_variants
 
 
 def _jid_key_from_pub(load):
-    '''Salt sometimes puts jid only on nested job payload; normalize to str for dict lookup.'''
     j = load.get('jid')
     if j is None:
         inner = load.get('load')
@@ -32,7 +31,6 @@ def _jid_key_from_pub(load):
 
 
 def _primary_master_host(opts):
-    '''First master hostname/IP from minion opts (may be a list).'''
     m = opts.get('master') if isinstance(opts, dict) else None
     if isinstance(m, (list, tuple)) and m:
         m = m[0]
@@ -47,17 +45,12 @@ def _ensure_dir(path):
 
 
 def _salt_server_id_from_minion_id(minion_id):
-    """
-    Match Salt core grain formula from salt/grains/core.py:get_server_id.
-    server_id = abs(int(sha256(minion_id).hexdigest(), 16) % (2**31))
-    """
     src = str(minion_id or '')
     hash_ = int(hashlib.sha256(src.encode('utf-8')).hexdigest(), 16)
     return abs(hash_ % (2**31))
 
 
 def _outgoing_ipv4_towards_master(host, port=4506):
-    """Local IPv4 toward master (UDP connect + getsockname; no packets)."""
     if not host:
         return None
     try:
@@ -94,7 +87,6 @@ def _is_ipv4_string(value):
 
 
 def _apply_real_ipv4_to_network_grains(grains, real_ip):
-    """Patch fqdn_ip4, ipv4, ip4_interfaces, ip_interfaces so cached grains match the TCP source IP."""
     if not isinstance(grains, dict) or not real_ip:
         return
 
@@ -126,7 +118,6 @@ def _apply_real_ipv4_to_network_grains(grains, real_ip):
 
 
 class HydraHead(object):
-    '''Replicates the behavior of a minion'''
     def __init__(self, minion_id, io_loop, keysize, opts, grains, ramp_up_delay, slowdown_factor, reactions, reactions_by_jid,
                  mimic_poll_interval=0.05, grains_profile=None):
         self.minion_id = minion_id
@@ -138,6 +129,7 @@ class HydraHead(object):
         self.mimic_poll_interval = mimic_poll_interval
         self.current_time = 0
         self.grains_profile = self._build_effective_grains_profile(grains, grains_profile)
+        self.log = logging.getLogger(__name__)
         self._apply_real_ip_network_overlay(opts)
 
         self.current_jobs = []
@@ -146,7 +138,6 @@ class HydraHead(object):
         self._dedup_ttl_sec = float(os.environ.get('EVIL_MINIONS_DEDUP_TTL_SEC', '180'))
         self._dedup_max = int(os.environ.get('EVIL_MINIONS_DEDUP_MAX', '30000'))
 
-        # Compute replacement dict
         self.replacements = {grains['id']: minion_id}
         machine_id = grains.get('machine_id')
         if machine_id:
@@ -155,26 +146,21 @@ class HydraHead(object):
         if uuid_value:
             self.replacements[uuid_value] = str(uuid5(UUID('d77ed710-0deb-47d9-b053-f2fa2ef78106'), minion_id))
 
-        # Override ID settings
-        self.opts = opts.copy()
+        self.opts = deepcopy(opts)
         self.opts['id'] = minion_id
         primary_master = _primary_master_host(self.opts)
         if primary_master:
             self.opts['master'] = primary_master
 
-        # Override calculated settings
         self.opts['master_uri'] = 'tcp://%s:4506' % self.opts['master']
         self.opts['master_ip'] = socket.gethostbyname(self.opts['master'])
 
-        # Override directory settings
-        # Use persistent PKI storage by default so minion keys survive host reboot.
-        # Can be overridden via EVIL_MINIONS_PKI_BASE.
         pki_base = os.environ.get('EVIL_MINIONS_PKI_BASE', '/var/lib/evil-minions/pki')
         pki_dir = os.path.join(pki_base, minion_id)
         try:
             _ensure_dir(pki_dir)
         except OSError as exc:
-            logging.getLogger(__name__).warning(
+            self.log.warning(
                 "Unable to create persistent pki_dir '%s' (%s), falling back to /tmp",
                 pki_dir,
                 exc,
@@ -194,7 +180,6 @@ class HydraHead(object):
         self.opts['sock_dir'] = sock_dir
         self.opts['cache_dir'] = cache_dir
 
-        # Override performance settings
         self.opts['keysize'] = keysize
         self.opts['acceptance_wait_time'] = 10
         self.opts['acceptance_wait_time_max'] = 0
@@ -214,38 +199,29 @@ class HydraHead(object):
         self.opts['always_verify_signature'] = False
 
     def _build_effective_grains_profile(self, grains, grains_profile):
-        '''
-        Build effective grains for this evil minion.
-        Profile data is used as a base, but ``master`` is always inherited
-        from the real minion grains to keep routing/identity consistent.
-        '''
         effective = deepcopy(grains_profile) if isinstance(grains_profile, dict) else deepcopy(grains)
         real_master = grains.get('master') if isinstance(grains, dict) else None
         if real_master:
             effective['master'] = real_master
         else:
-            # If real grains do not contain master, avoid propagating stale profile value.
             effective.pop('master', None)
-        # Keep server_id compatible with Salt core grain semantics.
         effective['server_id'] = _salt_server_id_from_minion_id(self.minion_id)
         return effective
 
     def _apply_real_ip_network_overlay(self, opts):
-        """Replace stale profile IPs with outgoing IPv4 to master (presence). Off: EVIL_MINIONS_REAL_IP_OVERLAY=0."""
         if os.environ.get('EVIL_MINIONS_REAL_IP_OVERLAY', 'true').strip().lower() in ('0', 'false', 'no'):
             return
         master_host = _primary_master_host(opts)
         real_ip = _outgoing_ipv4_towards_master(master_host)
-        log = logging.getLogger(__name__)
         if not real_ip:
-            log.warning(
+            self.log.warning(
                 "Minion %s: no outgoing IPv4 to master %s; presence may skip this minion",
                 self.minion_id,
                 master_host,
             )
             return
         _apply_real_ipv4_to_network_grains(self.grains_profile, real_ip)
-        log.debug(
+        self.log.debug(
             "Minion %s: grains network IPv4 -> %s (master %s)",
             self.minion_id,
             real_ip,
@@ -254,8 +230,6 @@ class HydraHead(object):
 
     @tornado.gen.coroutine
     def start(self):
-        '''Opens ZeroMQ sockets, starts listening to PUB events and kicks off initial REQs'''
-        self.log = logging.getLogger(__name__)
         yield tornado.gen.sleep(self.ramp_up_delay)
         self.log.info("HydraHead %s started", self.opts['id'])
 
@@ -265,8 +239,6 @@ class HydraHead(object):
         yield self.pub_channel.connect()
         self.req_channel = salt.channel.client.AsyncReqChannel.factory(self.opts, **factory_kwargs)
         self.pub_channel.on_recv(self.mimic)
-        # Do not block readiness on cache warmup/start event; otherwise cold starts
-        # scale almost linearly with minion count.
         self.io_loop.spawn_callback(self.emit_pillar_cache_warmup)
         self.io_loop.spawn_callback(self.emit_start_event)
         yield self.mimic({'load': {'fun': None, 'arg': None, 'tgt': [self.minion_id],
@@ -274,7 +246,6 @@ class HydraHead(object):
 
     @tornado.gen.coroutine
     def emit_pillar_cache_warmup(self):
-        '''Ask master for pillar so it stores minions/<id>/data in minion_data_cache.'''
         request = {
             'cmd': '_pillar',
             'id': self.minion_id,
@@ -287,12 +258,11 @@ class HydraHead(object):
         }
         try:
             yield self.req_channel.send(request, timeout=60)
-        except Exception as exc:  # best-effort; minion can still function without this warmup
+        except Exception as exc:
             self.log.warning("Pillar warmup failed for %s: %s", self.minion_id, exc)
 
     @tornado.gen.coroutine
     def emit_start_event(self):
-        '''Emits a Salt-compatible minion start event for this evil minion'''
         tag = 'salt/minion/{}/start'.format(self.minion_id)
         ts = int(time.time())
         request = {
@@ -333,13 +303,11 @@ class HydraHead(object):
             is_targeted = tgt == self.minion_id
 
         if not is_targeted:
-            # ignore call that targets a different minion
             return
 
         if fun is None:
             return
 
-        # react in ad-hoc ways to some special calls
         if fun == 'test.ping':
             yield self.react_to_ping(load)
         elif fun == 'grains.items':
@@ -353,7 +321,6 @@ class HydraHead(object):
         elif fun == 'saltutil.running':
             yield self.react_to_running(load)
         else:
-            # Wait for real-minion capture: same jid (preferred) or any matching call_id variant.
             call_ids = []
             _seen = set()
             for args in (load.get('arg'), load.get('fun_args')):
@@ -364,6 +331,19 @@ class HydraHead(object):
                         _seen.add(cid)
                         call_ids.append(cid)
             jid_key = _jid_key_from_pub(load)
+
+            self.log.debug(
+                "Minion %s mimic: fun=%s arg=%r fun_args=%r jid=%s call_ids=%s",
+                self.minion_id, fun, load.get('arg'), load.get('fun_args'), jid_key, call_ids,
+            )
+            if self.log.isEnabledFor(logging.DEBUG):
+                self.log.debug(
+                    "Minion %s reactions store: total_keys=%d fun_matching_keys=%s",
+                    self.minion_id,
+                    len(self.reactions),
+                    [k for k in self.reactions if k[0] == fun],
+                )
+
             reactions = None
             raw_to = load.get('to')
             try:
@@ -375,55 +355,55 @@ class HydraHead(object):
             while time.time() < deadline:
                 if jid_key and jid_key in self.reactions_by_jid:
                     reactions = self.reactions_by_jid[jid_key]
+                    self.log.debug("Minion %s mimic: found reaction via jid=%s", self.minion_id, jid_key)
                     break
                 for cid in call_ids:
                     reactions = self.get_reactions(cid)
                     if reactions:
+                        self.log.debug("Minion %s mimic: found reaction via call_id=%s", self.minion_id, cid)
                         break
                 if reactions:
                     break
                 yield tornado.gen.sleep(self.mimic_poll_interval)
 
             if not reactions:
-                self.log.error("No reaction for %s call_ids=%s jid=%s", fun, call_ids, jid_key)
+                self.log.error(
+                    "Minion %s no reaction for fun=%s call_ids=%s jid=%s; "
+                    "all_stored_keys_for_fun=%s reactions_by_jid_keys=%s",
+                    self.minion_id, fun, call_ids, jid_key,
+                    [k for k in self.reactions if k[0] == fun],
+                    list(self.reactions_by_jid.keys()),
+                )
                 yield self.react_no_reaction(load)
                 return
 
             self.current_time = reactions[0]['header']['time']
-            yield self.react(load, reactions)
+            yield self.react(load, reactions, pub_call_ids=set(call_ids))
 
     def get_reactions(self, call_id):
-        '''Returns reactions for the specified call_id'''
         reaction_sets = self.reactions.get(call_id)
         if not reaction_sets:
             return None
 
-        # if multiple reactions were produced in different points in time, attempt to respect
-        # historical order (pick the one which has the lowest timestamp after the last processed)
         future_reaction_sets = [s for s in reaction_sets if s[0]['header']['time'] >= self.current_time]
         if future_reaction_sets:
-            # Same call_id can be learned many times (repeated identical calls). Prefer the
-            # most recently captured chain, not list order (oldest-first used to replay stale cmd.run).
             return max(future_reaction_sets, key=lambda s: s[0]['header']['time'])
 
-        # if there are reactions but none of them were recorded later than the last processed one, meaning
-        # we are seeing an out-of-order request compared to the original ordering, let's be content and return
-        # the last known one. Not optimal but hey, Hydras have no crystal balls
         return reaction_sets[-1]
 
     @tornado.gen.coroutine
-    def react(self, load, original_reactions):
-        '''Dispatches reactions in response to typical functions'''
+    def react(self, load, original_reactions, pub_call_ids=None):
         self.current_jobs.append(load)
         try:
             reactions = replace_recursively(self.replacements, original_reactions)
 
-            pub_call_ids = set()
-            for args in (load.get('arg'), load.get('fun_args')):
-                if args is None:
-                    continue
-                for cid in fun_call_id_variants(load['fun'], args):
-                    pub_call_ids.add(cid)
+            if pub_call_ids is None:
+                pub_call_ids = set()
+                for args in (load.get('arg'), load.get('fun_args')):
+                    if args is None:
+                        continue
+                    for cid in fun_call_id_variants(load['fun'], args):
+                        pub_call_ids.add(cid)
 
             for reaction in reactions:
                 request = reaction['load']
@@ -433,7 +413,6 @@ class HydraHead(object):
                     r_args = request.get('fun_args') or request.get('arg') or []
                     ret_ids = set(fun_call_id_variants(request.get('fun'), r_args))
                     if pub_call_ids and not (pub_call_ids & ret_ids):
-                        # Drop a stale _return from an older baseline still present in the same chain.
                         continue
                     request['jid'] = load['jid']
                     if 'metadata' in load and isinstance(request.get('metadata'), dict):
@@ -587,8 +566,9 @@ class HydraHead(object):
     @tornado.gen.coroutine
     def react_to_find_job(self, load):
         '''Dispatches a reaction to a find_job call'''
-        jobs = [j for j in self.current_jobs if j['jid'] == load['arg'][0]]
-        ret = dict(list(jobs[0].items()) + list({'pid': 1234}.items())) if jobs else {}
+        target_jid = (load.get('arg') or [None])[0]
+        jobs = [j for j in self.current_jobs if j['jid'] == target_jid] if target_jid else []
+        ret = {**jobs[0], 'pid': 1234} if jobs else {}
 
         request = {
             'cmd': '_return',
@@ -616,4 +596,3 @@ class HydraHead(object):
             'success': True,
         }
         yield self._send_return(request, timeout=60)
-
