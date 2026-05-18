@@ -58,12 +58,12 @@ class Hydra(object):
         stream = zmq.eventloop.zmqstream.ZMQStream(socket, io_loop)
         stream.on_recv(self.update_reactions)
 
+        setup_worker_logging()
+        self.log = logging.getLogger(__name__)
+
         opts = salt.config.minion_config('/etc/salt/minion')
         grains = salt.loader.grains(opts)
         self._load_grains_profiles()
-
-        setup_worker_logging()
-        self.log = logging.getLogger(__name__)
         self.log.debug("Starting Hydra on: %s", chunk)
 
         first_head_number = chunk[0] if chunk else 0
