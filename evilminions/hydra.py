@@ -42,10 +42,6 @@ class Hydra(object):
     def start(self, hydra_count, chunk,
               ramp_up_delay, slowdown_factor, random_slowdown_factor, keysize,
               mimic_poll_interval, semaphore):
-        setup_worker_logging()
-        self.log = logging.getLogger(__name__)
-        self.log.debug("Starting Hydra on: %s", chunk)
-
         self._id_source = os.environ.get('EVIL_MINIONS_ID_SOURCE', 'profile').strip().lower()
         self._enforce_unique = (
             os.environ.get('EVIL_MINIONS_ENFORCE_UNIQUE_IDS', 'true').strip().lower()
@@ -65,6 +61,10 @@ class Hydra(object):
         opts = salt.config.minion_config('/etc/salt/minion')
         grains = salt.loader.grains(opts)
         self._load_grains_profiles()
+
+        setup_worker_logging()
+        self.log = logging.getLogger(__name__)
+        self.log.debug("Starting Hydra on: %s", chunk)
 
         first_head_number = chunk[0] if chunk else 0
         delays = [

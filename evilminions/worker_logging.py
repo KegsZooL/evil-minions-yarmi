@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 
 
 def setup():
@@ -7,5 +8,11 @@ def setup():
     level = getattr(logging, name.upper(), logging.INFO)
     root = logging.getLogger()
     root.setLevel(level)
-    if not root.handlers:
-        logging.basicConfig(level=level, format='%(levelname)s:%(message)s')
+
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter('%(levelname)s:%(message)s'))
+    root.addHandler(handler)
